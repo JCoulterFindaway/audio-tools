@@ -1,48 +1,52 @@
 #!/usr/bin/env python3
 """
-Batch Audio Prober
+Batch Audio Prober with FFmpeg Version Management
 
-A tool for batch processing audio files using the advanced probing capabilities
-from audio_service_prober.py. Processes directories of audio files and exports
-detailed metadata to CSV format.
-
-Features:
-- Recursive directory traversal
-- Advanced metadata extraction (bitrate, channels, duration, format, etc.)
-- Robust error handling with multiple probing strategies
-- CSV export with comprehensive results
-- Progress tracking during batch operations
+Enhanced batch processing tool that supports multiple ffmpeg versions
+for comprehensive corruption diagnosis and analysis.
 """
 
 import os
 import pandas as pd
 from typing import List, Dict
 from pathlib import Path
+import argparse
 
 from audio_service_prober import ProbeData
+from ffmpeg_config import FFmpegConfig, FFmpegVersionManager
 
 
 class BatchAudioProber:
     """
-    Batch processor for audio files using the ProbeData class.
+    Batch processor for audio files with ffmpeg version management.
     
-    Handles directory traversal, batch processing, and CSV export
-    of audio metadata while maintaining separation of concerns.
+    Supports processing with specific ffmpeg versions for enhanced
+    corruption detection and analysis.
     """
     
     # Supported audio file extensions
-    SUPPORTED_EXTENSIONS = {'.mp3', '.flac', '.m4a', '.ogg', '.wav'}
+    SUPPORTED_EXTENSIONS = {'.mp3', '.flac', '.m4a', '.ogg', '.wav', '.aac', '.wma'}
 
-    def __init__(self, data_folder: str, output_file: str = None):
+    def __init__(self, data_folder: str, output_file: str = None, 
+                 ffmpeg_version: str = None):
         """
-        Initialize the batch prober.
+        Initialize the batch prober with optional ffmpeg version.
 
         Args:
             data_folder: Path to the folder containing audio files
             output_file: Output CSV file path. If None, auto-generates based 
                         on input folder name in Batch_Probe_Reports directory
+            ffmpeg_version: Specific ffmpeg version to use. Uses default if None.
         """
         self.data_folder = Path(data_folder)
+        
+        # Initialize ffmpeg configuration
+        if ffmpeg_version:
+            self.ffmpeg_config = FFmpegConfig.for_version(ffmpeg_version)
+        else:
+            self.ffmpeg_config = FFmpegConfig.default()
+        
+        print(f"Using {self.ffmpeg_config}")
         
         # Auto-generate output filename if not provided
         if output_file is None:
@@ -66,7 +70,7 @@ class BatchAudioProber:
     
     def _generate_output_filename(self) -> str:
         """
-        Generate output filename based on input folder name.
+        Generate output filename based on input folder name and ffmpeg version.
         
         Returns:
             String path to output CSV file in Batch_Probe_Reports directory
@@ -74,8 +78,9 @@ class BatchAudioProber:
         # Get the name of the input folder
         folder_name = self.data_folder.name
         
-        # Create filename with the specified format
-        csv_filename = f"{folder_name}_ffmpeg_probe_report.csv"
+        # Include ffmpeg version in filename for clarity
+        version_suffix = f"_ffmpeg{self.ffmpeg_config.version}"
+        csv_filename = f"{folder_name}{version_suffix}_probe_report.csv"
         
         # Create full path in Batch_Probe_Reports directory
         output_dir = Path(os.getcwd()) / "Batch_Probe_Reports"
@@ -111,7 +116,7 @@ class BatchAudioProber:
     
     def process_file(self, file_path: Path) -> Dict:
         """
-        Process a single audio file and extract metadata.
+        Process a single audio file and extract metadata using configured ffmpeg version.
 
         Args:
             file_path: Path to the audio file
@@ -133,6 +138,8 @@ class BatchAudioProber:
             'format_name': None,
             'mime_type': None,
             'warnings': None,
+            'ffmpeg_version': None,
+            'ffmpeg_identifier': None,
             'probe_raw_output': None
         }
 
@@ -140,8 +147,8 @@ class BatchAudioProber:
             # Get file size
             result['file_size_bytes'] = file_path.stat().st_size
 
-            # Probe the file using the existing ProbeData class
-            probe = ProbeData.generate(str(file_path))
+            # Probe the file using the configured ffmpeg version
+            probe = ProbeData.generate(str(file_path), self.ffmpeg_config.version)
 
             # Extract metadata
             probe_dict = probe.to_dict()
@@ -158,6 +165,8 @@ class BatchAudioProber:
                 'format_name': probe_dict.get('format_name'),
                 'mime_type': probe_dict.get('mime_type'),
                 'warnings': warnings_str,
+                'ffmpeg_version': probe_dict.get('ffmpeg_version'),
+                'ffmpeg_identifier': probe_dict.get('ffmpeg_identifier'),
                 'probe_raw_output': probe_dict.get('raw')
             })
 
@@ -187,6 +196,7 @@ class BatchAudioProber:
         if show_progress:
             print(f"Found {len(audio_files)} audio files to process")
             print(f"Processing files in: {self.data_folder}")
+            print(f"Using FFmpeg: {self.ffmpeg_config}")
             print("-" * 60)
 
         self.results = []
@@ -216,11 +226,12 @@ class BatchAudioProber:
         # Create DataFrame
         df = pd.DataFrame(self.results)
 
-        # Reorder columns for better readability
+        # Reorder columns for better readability (including new ffmpeg columns)
         column_order = [
             'file_path', 'status', 'bitrate', 'channels', 'duration',
             'format_name', 'mime_type', 'warnings', 'file_size_bytes',
-            'error_message', 'absolute_path', 'probe_raw_output'
+            'ffmpeg_version', 'ffmpeg_identifier', 'error_message', 
+            'absolute_path', 'probe_raw_output'
         ]
 
         # Only include columns that exist in the DataFrame
@@ -253,12 +264,19 @@ class BatchAudioProber:
             'total_duration_seconds': None,
             'avg_bitrate': None,
             'formats_found': [],
+            'ffmpeg_version': self.ffmpeg_config.get_version_info().get('version', 'unknown'),
+            'ffmpeg_identifier': self.ffmpeg_config.version,
+            'warnings_detected': 0,
         }
 
         # Calculate additional statistics for successful files
         successful_files = df[df['status'] == 'Success']
 
         if not successful_files.empty:
+            # Count files with warnings
+            files_with_warnings = successful_files[successful_files['warnings'].notna()]
+            summary['warnings_detected'] = len(files_with_warnings)
+            
             # Total duration (convert string durations to float)
             durations = successful_files['duration'].dropna()
             if not durations.empty:
@@ -293,10 +311,12 @@ class BatchAudioProber:
         print("\n" + "=" * 50)
         print("BATCH PROCESSING SUMMARY")
         print("=" * 50)
+        print(f"FFmpeg Version: {summary['ffmpeg_version']} ({summary['ffmpeg_identifier']})")
         print(f"Total files processed: {summary['total_files']}")
         print(f"Successful: {summary['successful']}")
         print(f"Errors: {summary['errors']}")
         print(f"File not found: {summary['file_not_found']}")
+        print(f"Files with warnings: {summary['warnings_detected']}")
 
         if summary['total_duration_seconds']:
             hours = int(summary['total_duration_seconds'] // 3600)
@@ -317,18 +337,81 @@ class BatchAudioProber:
 
 def main():
     """
-    Main execution function that handles both folders and individual files.
-    
-    Supports two workflows:
-    1. Folders: Audio/folder_name/*.{mp3,flac,wav,m4a,aac,ogg,wma} → folder_name_ffmpeg_probe_report.csv
-    2. Individual files: Audio/*.{mp3,flac,wav,m4a,aac,ogg,wma} → individual_files_ffmpeg_probe_report.csv
+    Enhanced main function with command-line argument support for ffmpeg version selection.
     """
+    parser = argparse.ArgumentParser(
+        description="Batch Audio Prober with FFmpeg Version Management",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python batch_audio_prober.py                    # Use default ffmpeg version
+  python batch_audio_prober.py --ffmpeg 5.1.6    # Use specific version
+  python batch_audio_prober.py --list-versions    # Show available versions
+  python batch_audio_prober.py --compare          # Compare all versions (first file only)
+        """
+    )
+    
+    parser.add_argument(
+        '--ffmpeg', '--ffmpeg-version',
+        dest='ffmpeg_version',
+        help='FFmpeg version to use (e.g., 5.1.6, 7.1.0, 8.0.0, system)'
+    )
+    
+    parser.add_argument(
+        '--list-versions',
+        action='store_true',
+        help='List available FFmpeg versions and exit'
+    )
+    
+    parser.add_argument(
+        '--compare',
+        action='store_true',
+        help='Compare results across all available FFmpeg versions (uses first audio file found)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Handle version listing
+    if args.list_versions:
+        manager = FFmpegVersionManager()
+        manager.print_status()
+        return
     audio_base_dir = Path(os.getcwd()) / "Audio"
     
     if not audio_base_dir.exists():
         print(f"Error: Audio directory not found at {audio_base_dir}")
         print("Please create an 'Audio' directory and add your audio "
               "files or folders there.")
+        return
+    
+    # Handle comparison mode
+    if args.compare:
+        # Find first audio file for comparison
+        audio_extensions = {'.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.wma'}
+        test_file = None
+        
+        for item in audio_base_dir.rglob('*'):
+            if item.is_file() and item.suffix.lower() in audio_extensions:
+                test_file = item
+                break
+        
+        if not test_file:
+            print("No audio files found for comparison.")
+            return
+        
+        print(f"Comparing FFmpeg versions using: {test_file.name}")
+        print("=" * 60)
+        
+        comparison = ProbeData.compare_versions(str(test_file))
+        
+        for version, result in comparison.items():
+            status = "✅" if result['status'] == 'success' else "❌"
+            warnings = result.get('warnings_count', 0)
+            print(f"{status} {version:10} | Status: {result['status']:8} | Warnings: {warnings}")
+            
+            if result['status'] == 'error':
+                print(f"   └─ Error: {result.get('error', 'Unknown error')}")
+        
         return
     
     # Find both subdirectories and individual audio files
@@ -346,6 +429,22 @@ def main():
         return
     
     total_items = len(audio_folders) + (1 if individual_files else 0)
+    
+    # Show ffmpeg version being used
+    try:
+        if args.ffmpeg_version:
+            config = FFmpegConfig.for_version(args.ffmpeg_version)
+        else:
+            config = FFmpegConfig.default()
+        
+        print(f"Using {config}")
+        version_info = config.get_version_info()
+        print(f"FFmpeg Version: {version_info.get('version', 'unknown')}")
+        print()
+    except Exception as e:
+        print(f"Error with FFmpeg configuration: {e}")
+        return
+    
     print(f"Found {total_items} item(s) to process:")
     
     # Show what we found
@@ -367,7 +466,7 @@ def main():
         print("=" * 50)
         
         try:
-            processor = BatchAudioProber(str(folder))
+            processor = BatchAudioProber(str(folder), ffmpeg_version=args.ffmpeg_version)
             print(f"Output will be saved to: {processor.output_file}")
             
             processor.process_batch(show_progress=True)
@@ -386,11 +485,12 @@ def main():
         
         try:
             # Create a temporary "virtual folder" for individual files
-            processor = BatchAudioProber(str(audio_base_dir))
+            processor = BatchAudioProber(str(audio_base_dir), ffmpeg_version=args.ffmpeg_version)
             
             # Override the output filename for individual files
             reports_dir = Path(os.getcwd()) / 'Batch_Probe_Reports'
-            processor.output_file = str(reports_dir / 'individual_files_ffmpeg_probe_report.csv')
+            version_suffix = f"_ffmpeg{processor.ffmpeg_config.version}"
+            processor.output_file = str(reports_dir / f'individual_files{version_suffix}_probe_report.csv')
             
             print(f"Output will be saved to: {processor.output_file}")
             

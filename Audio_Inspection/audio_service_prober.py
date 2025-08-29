@@ -1,19 +1,32 @@
 
+#!/usr/bin/env python3
+"""
+Audio Service Prober with FFmpeg Version Management
+
+Enhanced version of the audio prober that supports multiple ffmpeg versions
+for comprehensive corruption diagnosis. Different ffmpeg versions may detect
+different types of audio corruption or provide varying levels of detail.
+"""
+
 import json
 import re
 import subprocess
 from decimal import Decimal
+from typing import Optional
+
+from ffmpeg_config import FFmpegConfig
 
 # from util import get_logger
-
 # log = get_logger()
 
 
 class BaseProbe(object):
     """
-    Starting "basic" prober that handles most cases.  Makes a
+    Starting "basic" prober that handles most cases. Makes a
     "best effort" to grab as much metadata as possible before
     failing so as to inform later probes.
+    
+    Now supports multiple ffmpeg versions for enhanced corruption detection.
     """
 
     formats = ['flac', 'mp3', 'm4a', 'ogg', 'wav']
@@ -46,16 +59,29 @@ class BaseProbe(object):
         r'\\x[0-9a-f]{2}',   # Byte sequences in metadata (encoding issues)
     ]))
 
-    def __init__(self, probe_args):
+    def __init__(self, probe_args, ffmpeg_config: Optional[FFmpegConfig] = None):
+        """
+        Initialize the probe with optional ffmpeg version configuration.
+        
+        Args:
+            probe_args: Arguments for probing (must include 'source_url')
+            ffmpeg_config: FFmpeg configuration. Uses default if None.
+        """
         self.exception = None
         self._probe_data = None
         self._decoded_data = None
         self._parsed_data = {}
 
         self.probe_args = probe_args
+        
+        # Initialize ffmpeg configuration
+        self.ffmpeg_config = ffmpeg_config or FFmpegConfig.default()
+        
+        # Store version info for debugging/reporting
+        self.ffmpeg_version_info = self.ffmpeg_config.get_version_info()
 
         self.probe_command = [
-            'ffmpeg',
+            self.ffmpeg_config.binary_path,  # Use configured ffmpeg version
             '-xerror',
             '-loglevel', 'info',
             '-vn',
@@ -80,23 +106,37 @@ class BaseProbe(object):
         """
         if not self._probe_data:
             try:
-                command = [
-                    x.format(**self.probe_args)
-                    for x in self.probe_command
+                # Use the new Docker-aware execution method
+                source_url = self.probe_args['source_url']
+                command_args = [
+                    x.format(**self.probe_args) if x != self.ffmpeg_config.binary_path else x
+                    for x in self.probe_command[1:]  # Skip the ffmpeg binary path
                 ]
-                print(command)
-                proc = subprocess.run(command, **self.subprocess_opts)
+                
+                print(f"Running command with {self.ffmpeg_config.version}: {[self.ffmpeg_config.binary_path] + command_args}")
+                
+                # Use the version manager's execute method for Docker support
+                proc = self.ffmpeg_config.version_manager.execute_ffmpeg_command(
+                    self.ffmpeg_config.version, 
+                    command_args, 
+                    source_url
+                )
+                
                 print(proc.stderr)
                 self._probe_data = proc.stderr
 
             except subprocess.CalledProcessError as e:
-                print(e.stderr)
+                print(f"FFmpeg {self.ffmpeg_config.version} error: {e.stderr}")
                 # log.error(
                 #     'Audio probe error',
                 #     exit_code=e.returncode,
                 #     stderr=e.stderr,
+                #     ffmpeg_version=self.ffmpeg_config.version
                 # )
                 # self.exception = e
+            except Exception as e:
+                print(f"FFmpeg {self.ffmpeg_config.version} execution error: {e}")
+                self.exception = e
 
         return self._probe_data
 
@@ -209,7 +249,7 @@ class BaseProbe(object):
 
     @property
     def complete(self):
-        return(
+        return (
             self.bitrate is not None and
             self.channels is not None and
             self.duration is not None and
@@ -220,7 +260,10 @@ class BaseProbe(object):
         )
 
     def to_dict(self):
-        return {
+        """
+        Convert probe results to dictionary, including ffmpeg version info.
+        """
+        result = {
             'bitrate': self.bitrate,
             'channels': self.channels,
             'duration': str(self.duration),
@@ -228,7 +271,10 @@ class BaseProbe(object):
             'mime_type': self.mime_type,
             'raw': self.raw,
             'warnings': self.extract_warnings(),
+            'ffmpeg_version': self.ffmpeg_version_info.get('version', 'unknown'),
+            'ffmpeg_identifier': self.ffmpeg_config.version,
         }
+        return result
 
     def to_json(self):
         return json.dumps(self.to_dict(), indent=4, sort_keys=True)
@@ -240,12 +286,11 @@ class FormatProbe(BaseProbe):
     probe data.
     """
 
-    def __init__(self, probe_args):
-
-        super().__init__(probe_args)
+    def __init__(self, probe_args, ffmpeg_config: Optional[FFmpegConfig] = None):
+        super().__init__(probe_args, ffmpeg_config)
 
         self.probe_command = [
-            'ffmpeg',
+            self.ffmpeg_config.binary_path,  # Use configured ffmpeg version
             '-xerror',
             '-loglevel', 'info',
             '-vn',
@@ -264,12 +309,11 @@ class FormatWriteProbe(BaseProbe):
     is slower and should be a late choice for probing.
     """
 
-    def __init__(self, probe_args):
-
-        super().__init__(probe_args)
+    def __init__(self, probe_args, ffmpeg_config: Optional[FFmpegConfig] = None):
+        super().__init__(probe_args, ffmpeg_config)
 
         self.probe_command = [
-            'ffmpeg',
+            self.ffmpeg_config.binary_path,  # Use configured ffmpeg version
             '-xerror',
             '-loglevel', 'info',
             '-vn',
@@ -288,23 +332,46 @@ class FormatWriteProbe(BaseProbe):
 
 class ProbeData(object):
     """
-    Factory object generating probe objects.
+    Factory object generating probe objects with ffmpeg version support.
+    
+    Enhanced to support multiple ffmpeg versions for comprehensive
+    corruption analysis.
     """
+    
     @classmethod
-    def generate(cls, source_url):
-        probe = BaseProbe({'source_url': source_url})
+    def generate(cls, source_url, ffmpeg_version: str = None):
+        """
+        Generate probe data using specified or default ffmpeg version.
+        
+        Args:
+            source_url: Path to audio file to probe
+            ffmpeg_version: Specific ffmpeg version to use. Uses default if None.
+            
+        Returns:
+            Completed probe object with audio metadata
+        """
+        # Create ffmpeg configuration
+        if ffmpeg_version:
+            ffmpeg_config = FFmpegConfig.for_version(ffmpeg_version)
+        else:
+            ffmpeg_config = FFmpegConfig.default()
+        
+        print(f"Probing with {ffmpeg_config}")
+        
+        # Try the standard probe first
+        probe = BaseProbe({'source_url': source_url}, ffmpeg_config)
 
         if not probe.complete and probe.format_name:
             probe = FormatWriteProbe({
                 'source_url': source_url,
                 'file_type': probe.format_name,
-            })
+            }, ffmpeg_config)
 
         if not probe.complete:
             probe = FormatProbe({
                 'source_url': source_url,
                 'file_type': 'mp3',
-            })
+            }, ffmpeg_config)
 
         if probe.exception:
             raise Exception('Unable to probe file') from probe.exception
@@ -318,9 +385,74 @@ class ProbeData(object):
         # log.info(probe=probe.to_json())
 
         raise Exception('Unable to probe file')
+    
+    @classmethod
+    def compare_versions(cls, source_url, versions: list = None):
+        """
+        Compare probing results across multiple ffmpeg versions.
+        
+        This is particularly useful for corruption analysis, as different
+        versions may detect different issues or provide varying detail levels.
+        
+        Args:
+            source_url: Path to audio file to probe
+            versions: List of ffmpeg versions to test. Uses all available if None.
+            
+        Returns:
+            Dictionary mapping version identifiers to probe results
+        """
+        from ffmpeg_config import FFmpegVersionManager
+        
+        if versions is None:
+            manager = FFmpegVersionManager()
+            versions = manager.list_available_versions()
+        
+        results = {}
+        
+        for version in versions:
+            try:
+                probe = cls.generate(source_url, version)
+                results[version] = {
+                    'status': 'success',
+                    'data': probe.to_dict(),
+                    'warnings_count': len(probe.extract_warnings()),
+                    'complete': probe.complete
+                }
+            except Exception as e:
+                results[version] = {
+                    'status': 'error',
+                    'error': str(e),
+                    'complete': False
+                }
+        
+        return results
 
 
 if __name__ == '__main__':
-    probe = ProbeData()
-    # update this to use the actual file path
-    probe.generate('9782073130808_01.mp3')
+    # Demo the new functionality
+    from ffmpeg_config import FFmpegVersionManager
+    
+    # Show available versions
+    manager = FFmpegVersionManager()
+    manager.print_status()
+    
+    # Test with a file if provided
+    import sys
+    if len(sys.argv) > 1:
+        test_file = sys.argv[1]
+        print(f"\nTesting with file: {test_file}")
+        
+        # Test default version
+        try:
+            probe = ProbeData.generate(test_file)
+            print("✅ Default version probe successful")
+        except Exception as e:
+            print(f"❌ Default version probe failed: {e}")
+        
+        # Compare across versions
+        print("\nComparing across versions:")
+        comparison = ProbeData.compare_versions(test_file)
+        for version, result in comparison.items():
+            status = "✅" if result['status'] == 'success' else "❌"
+            warnings = result.get('warnings_count', 0)
+            print(f"{status} {version}: {result['status']} (warnings: {warnings})")
