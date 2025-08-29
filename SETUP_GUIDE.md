@@ -16,7 +16,7 @@ This system provides **true FFmpeg version isolation** using Docker containers, 
 1. **Python 3.9+** (Recommended: Python 3.11)
    ```bash
    # Check your Python version
-   python3 --version
+   python --version
    ```
 
 2. **Docker Desktop**
@@ -47,16 +47,13 @@ This system provides **true FFmpeg version isolation** using Docker containers, 
 # Clone the repository
 git clone <repository-url>
 cd audio-tools
-
-# Switch to the FFmpeg version management branch
-git checkout feature/ffmpeg-version-management
 ```
 
 ### Step 2: Set Up Python Environment
 
 ```bash
 # Create virtual environment
-python3 -m venv venv
+python -m venv venv
 
 # Activate virtual environment
 source venv/bin/activate
@@ -338,7 +335,7 @@ Look for these corruption indicators:
 
 ```bash
 # Pull latest changes
-git pull origin feature/ffmpeg-version-management
+git pull origin main
 
 # Rebuild Docker images if needed
 ./build_ffmpeg_docker.sh
