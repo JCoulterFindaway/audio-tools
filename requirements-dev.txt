@@ -1,0 +1,5 @@
+boto3
+json
+requests
+requests_aws_sign
+structlog==22.3.0

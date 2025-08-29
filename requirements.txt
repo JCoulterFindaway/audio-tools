@@ -1,0 +1,8 @@
+# Core dependencies for audio-tools project
+pandas>=1.5.0
+pathlib>=1.0.0
+
+# Optional: For enhanced development
+# Uncomment if needed for development
+# jupyter>=1.0.0
+# matplotlib>=3.5.0
