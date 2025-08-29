@@ -11,7 +11,6 @@ This system provides **actual different FFmpeg versions** (5.1.6, 7.1.0, 8.0.0) 
 # Clone the repository
 git clone <repository-url>
 cd audio-tools
-git checkout feature/ffmpeg-version-management
 
 # Run automated setup (takes 10-15 minutes)
 ./quick_setup.sh
@@ -127,7 +126,7 @@ Different FFmpeg versions may detect:
 
 ```bash
 # Pull latest changes
-git pull origin feature/ffmpeg-version-management
+git pull origin main
 
 # Rebuild Docker images if needed
 ./build_ffmpeg_docker.sh
