@@ -61,9 +61,7 @@ cd Audio_Inspection
 
 ```bash
 # Create virtual environment in the parent directory (use latest Python version)
-python3.11 -m venv ../venv
-# Or fallback to default Python 3
-# python3 -m venv ../venv
+python -m venv ../venv
 
 # Activate virtual environment
 # On macOS/Linux:
